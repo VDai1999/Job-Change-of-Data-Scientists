@@ -1,0 +1,1076 @@
+---
+title: "Final Project"
+author: "Dai Dong"
+date: "4/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Load libraries**
+```{r, warnings=FALSE, message=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(mice)
+library(VIM)
+library(lattice)
+library(ROSE)
+library(pROC)
+library(ROCR)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(gbm)
+```
+
+Read the data
+```{r}
+data <- read.csv("aug_train.csv") %>%
+  # Delete enroll_id and city variable
+  select(-c(enrollee_id, city))
+summary(data)
+str(data)
+```
+
+
+#### Cleaning data
+```{r}
+# Recode variables
+data <- data %>%
+  # Recode variables as factor type
+  mutate(gender = as.factor(gender),
+         relevent_experience = as.factor(relevent_experience),
+         enrolled_university = as.factor(enrolled_university),
+         education_level = as.factor(enrolled_university),
+         major_discipline = as.factor(major_discipline),
+         experience = as.factor(experience), #
+         company_size = as.factor(company_size),
+         company_type = as.factor(company_type),
+         last_new_job = as.factor(last_new_job),
+         target = as.factor(target)) %>%
+  # Reorder levels of categorical variables in an appropriate order
+  mutate(gender =  factor(gender, levels = c("Male", "Female", "Other")),
+         enrolled_university = factor(enrolled_university, levels = c("no_enrollment", "Part time course",
+                                                                      "Full time course")),
+         education_level = factor(education_level, levels = c("no_enrollment", "Part time course", 
+                                                              "Full time course")),
+         major_discipline = factor(major_discipline, levels = c("Arts", "Business Degree", "Humanities",
+                                                                "STEM", "Other", "No Major")),
+         company_size = ifelse(as.character(company_size) == "10/49", "10-49", as.character(company_size)),
+         company_size = as.factor(company_size),
+         company_size = factor(company_size, levels = c("<10", "10-49", "50-99", "100-500", "500-999",
+                                                        "1000-4999", "5000-9999", "10000+")),
+         experience = factor(experience, levels = c("<1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
+                                                    "12", "13", "14", "15", "16", "17", "18", "19", "20", ">20")),
+         company_type = factor(company_type, levels = c("Early Stage Startup", "Funded Startup", "Pvt Ltd", 
+                                                        "Public Sector", "NGO", "Other")),
+         last_new_job = factor(last_new_job, levels = c("never", "1", "2", "3", "4", ">4")))
+
+str(data)
+```
+
+#### Collapse levels of experience variable
+The experience variable has 22 levels; thus, we decide to collapse this variable.
+```{r}
+# experience = <1 ~ <1
+# experience = [1-5] ~ <=5
+# experience = [6-10] ~ <=10
+# experience = [11-15] ~ <=15
+# experience = [16-20] ~ <=20
+# experience = >20 ~ >20
+data <- data %>%
+  mutate(experience = as.character(experience),
+         experience = case_when(experience %in% c("1", "2", "3", "4", "5") ~ "<=5",
+                                experience %in% c("6", "7", "8", "9", "10") ~ "<=10",
+                                experience %in% c("11", "12", "13", "14", "15") ~ "<=15",
+                                experience %in% c("16", "17", "18", "19", "20") ~ "<=20",
+                                experience %in% c("<1", ">20") ~ experience),
+         experience = factor(experience, levels = c("<1", "<=5", "<=10", "<=15", "<=20", ">20")))
+summary(data$experience)
+```
+
+
+#### Missing values
+```{r}
+# A function to calculate the number of missing values and the percentage of records for each variable that has missing values.
+missing_values <- function(dat) {
+  df <- as.data.frame(cbind(lapply(lapply(dat, is.na), sum))) %>%
+    rename(numberOfObservations = V1)
+  
+  # Change the index into the first column
+  df <- cbind(Variables = rownames(df), df)
+  rownames(df) <- 1:nrow(df)
+  
+  # Calculate percentage of missing values
+  df <- df %>%
+    mutate(numberOfObservations = as.integer(numberOfObservations),
+           missingPerc = round(numberOfObservations/nrow(data)*100, 2)) %>%
+    filter(numberOfObservations != 0) %>%
+    arrange(desc(numberOfObservations))
+  
+  return (df)
+}
+
+missing_df <- missing_values(data)
+missing_df
+```
+
+```{r}
+# EDA
+missing_df %>%
+  arrange(numberOfObservations) %>%
+  mutate(Variables = factor(Variables, levels = Variables)) %>%
+  ggplot(aes(x=numberOfObservations, y=Variables, label = numberOfObservations)) +
+    geom_col(color = "black", fill = "white") +
+    geom_text(hjust = -0.5, fontface = "bold") +
+    scale_x_continuous(limits = c(0, 6500),
+                       breaks = seq(0, 6200, by = 1000)) +
+    scale_y_discrete(labels = c("Experience", "Enrolled level", "Education university", "Last new job", "Major discipline", "Gender",
+                                "Company size", "Company type")) +
+    labs(x = "Number of observations",
+         y = "Variable") +
+    theme_bw()
+```
+
+Because both enrolled_university and experience variables have the same number of missing value, we doubt that those missing values are from the same observations.
+```{r}
+miss_subset_df <- data[rowSums(is.na(data[,c("enrolled_university", "education_level")])) > 0, ] %>%
+  select(c("enrolled_university", "education_level"))
+sum(is.na(miss_subset_df)) # 722 => it means that the whole data set contains missing values.
+```
+
+This confirms our assumption. Since the number of missing values is not really large (386 observations out of 19158 observations), we decide to delete records that have missing values in both columns.
+
+```{r}
+data <- data %>% filter(complete.cases(enrolled_university))
+missing_df <- missing_values(data)
+missing_df
+```
+
+For the rest of missing values, we decided to do imputation using MICE package. We assume that the missing data are missing at random (MAR).
+
+```{r}
+# m = no of imputed data set
+# maxit = no. of iterations taken to impute missing values
+#imputed_data <- mice(data, m=2, maxit = 2, seed = 500)
+```
+
+```{r}
+# # Get completed data
+# complete_data <- complete(imputed_data)
+# sum(is.na(complete_data))
+# 
+# summary(complete_data)
+# 
+# # Save an object to a file
+# saveRDS(complete_data, file = "complete_data.rds")
+```
+
+
+```{r}
+# Restore the object
+dat <- readRDS(file = "complete_data.rds")
+str(dat)
+summary(dat)
+```
+
+Plot the frequency of gender variable before and after imputation.
+```{r}
+# Create a data frame.
+gender_df <- data.frame(id = seq(1, nrow(dat), by = 1),
+                        bf_impute = data$gender,
+                        af_impute = dat$gender)
+summary(gender_df)
+
+# Change from wide to long format
+gender_df <- gender_df %>%
+  pivot_longer(cols = -id, names_to = "Imputation", values_to = "Gender")
+gender_df <- as.data.frame(table(gender_df$Imputation, gender_df$Gender))
+gender_df <- gender_df %>%
+  rename(Imputation = Var1,
+         Gender = Var2) %>%
+  mutate(Imputation = factor(Imputation, levels = c("bf_impute", "af_impute")))
+
+# Plot
+ggplot(data=gender_df, aes(x = Gender, y=Freq, fill = Imputation)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(aes(label = Freq), fontface = "bold", vjust = -0.5,
+             position = position_dodge(.9), size = 4) +
+  labs(y = "Number of observations") +
+  scale_y_continuous(limits = c(0, 17500)) +
+  scale_fill_discrete(name = "",
+                      labels = c("Before Imputation", "After Imputation")) +
+  theme_bw()
+```
+
+
+```{r}
+# Percentage changes
+# Male
+(16947-13041)/13041
+
+# Female
+(1592-1218)/1218
+
+# Other
+(273/178)/178
+```
+
+
+#### Imbalanced data set
+
+```{r}
+dat <- dat %>%
+  mutate(target = ifelse(target == "0", "No", "Yes"),
+         target = as.factor(target))
+
+#Frequency of the target variable
+table(dat$target)
+
+# Proportion of 2 classes
+prop.table(table(dat$target))
+```
+
+## METHOD 1: SYNTHETIC DATA GENERATION
+We can see that we have an imbalanced data set with about 25% of positive cases and 75% of negative cases. Even though The imbalance problem is not so severe, we still need to take care of this because it can incur poor predictive performance for the minority class which is the class we are interested in. \
+
+To deal with this problem, we will create a sample of synthetic data. 
+
+**The data generated from oversampling have expected amount of repeated observations. Data generated from undersampling is deprived of important information from the original data. This leads to inaccuracies in the resulting performance. **
+
+```{r}
+# Split data into training and test set.
+set.seed(1999)
+train_index <- sort(sample(1:nrow(dat),nrow(dat)*(4/5)))
+
+train_data <- dat[train_index, ]
+test_data <- dat[-train_index, ]
+```
+
+```{r}
+## Frequency of the target variable in the training data set
+table(train_data$target)
+
+# Proportion of 2 classes in the training data set
+prop.table(table(train_data$target))
+```
+
+We use `ROSE()` function from ROSE package to generate a newly synthetic training data set with the same number of observations as the original training data set.
+
+```{r}
+#train_balanced_both <- ovun.sample(target ~ ., data = train_data, method = "both", p=0.5, N=nrow(train_data), seed = 1)$data
+train_data_balanced <- ROSE(target ~ ., data = train_data, seed = 1999)$data
+prop.table(table(train_data_balanced$target))
+```
+
+As you can see now, we have a more balanced data set.
+
+
+#### Models
+
+**Stepwise with Linear Terms** \
+We will use the stepwise regresion model to select variables contribute the most to the model.
+```{r}
+# full <- glm(target ~ ., data=train_data_balanced, family="binomial")
+# null <- glm(target ~ 1, data=train_data_balanced, family="binomial")
+# 
+# lr_step_mod <- step(null, list(lower=formula(null), upper=formula(full)), data=train_data_balanced, direction="both", trace=0)
+# options(scipen = 999)
+# summary(lr_step_mod)
+# 
+# # Save an object to a file
+# saveRDS(lr_step_mod, file = "lr_step_mod.rds")
+
+# Read the model in
+lr_step_mod <- readRDS(file = "lr_step_mod.rds")
+lr_step_mod
+```
+
+**Logistic Regression Model**
+```{r}
+# set.seed(1999)
+# lr_mod <- train(formula(lr_step_mod),
+#                  data = train_data_balanced,
+#                  method = "glm",
+#                  family = "binomial",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  preProcess = c("center", "scale"))
+# lr_mod
+# 
+# # Save an object to a file
+# saveRDS(lr_mod, file = "lr_mod.rds")
+```
+
+```{r}
+# Read the model back
+lr_mod <- readRDS(file = "lr_mod.rds")
+lr_mod 
+```
+
+
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+lr_mod_est_train <- predict(lr_mod, train_data_balanced)
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, lr_mod_est_train, positive="Yes")
+```
+
+
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+lr_mod_est_test <- predict(lr_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(lr_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+lr_mod_est_prob <-  predict(lr_mod, newdata = test_data, type="prob")
+lr_test_auc <- roc(test_data$target, lr_mod_est_prob$Yes)$auc
+lr_test_auc
+```
+
+
+**KNN Model**
+```{r}
+# set.seed(1999)
+# knn_mod <- train(formula(lr_step_mod),
+#                  data = train_data_balanced,
+#                  method = "knn",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  preProcess = c("center", "scale"),
+#                  tuneGrid=data.frame(k=1:10))
+# knn_mod
+# 
+# # Save an object to a file
+# saveRDS(knn_mod, file = "knn_mod.rds")
+```
+
+```{r}
+# Read the model back
+knn_mod <- readRDS(file = "knn_mod.rds")
+knn_mod
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+knn_mod_est_train <- predict(knn_mod, train_data_balanced)
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, knn_mod_est_train, positive="Yes")
+```
+
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+knn_mod_est_test <- predict(knn_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(knn_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+knn_mod_est_prob <-  predict(knn_mod, newdata = test_data, type="prob")
+knn_test_auc <- roc(test_data$target, knn_mod_est_prob$Yes)$auc
+knn_test_auc
+```
+
+
+**Random Forest Model**
+```{r}
+# set.seed(1999)
+# rf_mod <- train(formula(lr_step_mod),
+#                 data = train_data_balanced,
+#                 method = "rf",
+#                 metric="ROC",
+#                 trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                 tuneGrid=data.frame(mtry=1:9),
+#                 ntree=100)
+# rf_mod
+# 
+# # Save an object to a file
+# saveRDS(rf_mod, file = "rf_mod.rds")
+```
+
+```{r}
+# Read RDS file
+rf_mod <- readRDS(file = "rf_mod.rds")
+rf_mod
+```
+
+
+```{r}
+varImp(rf_mod, scale=FALSE)
+```
+
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+rf_mod_est_train <- predict(rf_mod, train_data_balanced)
+
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, rf_mod_est_train, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+rf_mod_est_test <- predict(rf_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(rf_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+rf_mod_est_prob <-  predict(rf_mod, newdata = test_data, type="prob")
+rf_test_auc <- roc(test_data$target, rf_mod_est_prob$Yes)$auc
+rf_test_auc
+```
+
+**Boosting Model**
+```{r}
+# set.seed(1999)
+# boost_mod <- train(formula(lr_step_mod),
+#                  data = train_data_balanced,
+#                  method = "gbm",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  tuneGrid = expand.grid(n.trees=seq(100, 200, by=50),
+#                                         interaction.depth=1:7,
+#                                         shrinkage=0.1,
+#                                         n.minobsinnode=10),
+#                  verbose = F)
+# 
+# boost_mod
+# 
+# # Save an object to a file
+# saveRDS(boost_mod, file = "boost_mod.rds")
+```
+
+```{r}
+# Read the model back
+boost_mod <- readRDS(file = "boost_mod.rds")
+boost_mod
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+boost_mod_est_train <- predict(boost_mod, train_data_balanced)
+
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, boost_mod_est_train, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+boost_mod_est_test <- predict(boost_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(boost_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+boost_mod_est_prob <-  predict(boost_mod, newdata = test_data, type="prob")
+boost_test_auc <- roc(test_data$target, boost_mod_est_prob$Yes)$auc
+boost_test_auc
+```
+
+```{r}
+varImp(boost_mod, scale=FALSE)
+```
+
+**LDA Model**
+```{r}
+# set.seed(1999)
+# lda_mod <- train(formula(lr_step_mod),
+#                  data = train_data_balanced,
+#                  method = "lda",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  preProcess = c("center", "scale"))
+# 
+# lda_mod
+# 
+# # Save an object to a file
+# saveRDS(lda_mod, file = "lda_mod.rds")
+```
+
+```{r}
+# Read the model back
+lda_mod <- readRDS(file = "lda_mod.rds")
+lda_mod
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+lda_mod_est_train <- predict(lda_mod, train_data_balanced)
+
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, lda_mod_est_train, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+lda_mod_est_test <- predict(lda_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(lda_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+lda_mod_est_prob <-  predict(lda_mod, newdata = test_data, type="prob")
+lda_test_auc <- roc(test_data$target, lda_mod_est_prob$Yes)$auc
+lda_test_auc
+```
+
+**QDA Model**
+```{r}
+# set.seed(1999)
+# qda_mod <- train(formula(lr_step_mod),
+#                  data = train_data_balanced,
+#                  method = "qda",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  preProcess = c("center", "scale"))
+# 
+# qda_mod
+# 
+# # Save an object to a file
+# saveRDS(qda_mod, file = "qda_mod.rds")
+```
+
+```{r}
+# Read the model back
+qda_mod <- readRDS(file = "qda_mod.rds")
+qda_mod
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+qda_mod_est_train <- predict(qda_mod, train_data_balanced)
+
+# Confusion matrix
+confusionMatrix(train_data_balanced$target, qda_mod_est_train, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+qda_mod_est_test <- predict(qda_mod, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(qda_mod_est_test, test_data$target, positive = "Yes")
+
+# AUC
+qda_mod_est_prob <-  predict(qda_mod, newdata = test_data, type="prob")
+qda_test_auc <- roc(test_data$target, qda_mod_est_prob$Yes)$auc
+qda_test_auc
+```
+
+
+#### Evaluation
+```{r, message=FALSE}
+results<-data.frame(
+  Model = c("Logistic Regression", "KNN", "Random Forest", "Boosting", "LDA", "QDA"),
+  ROC.Valid = c(lr_test_auc, knn_test_auc, rf_test_auc, boost_test_auc, lda_test_auc, qda_test_auc),
+  Sens.Valid = c(sensitivity(lr_mod_est_test, test_data$target, positive="Yes"),
+                 sensitivity(knn_mod_est_test, test_data$target, positive="Yes"),
+                 sensitivity(rf_mod_est_test, test_data$target, positive="Yes"),
+                 sensitivity(boost_mod_est_test, test_data$target, positive="Yes"),
+                 sensitivity(lda_mod_est_test, test_data$target, positive="Yes"),
+                 sensitivity(qda_mod_est_test, test_data$target, positive="Yes")),
+  Spec.Valid = c(sensitivity(lr_mod_est_test, test_data$target),
+                 sensitivity(knn_mod_est_test, test_data$target),
+                 sensitivity(rf_mod_est_test, test_data$target),
+                 sensitivity(boost_mod_est_test, test_data$target),
+                 sensitivity(lda_mod_est_test, test_data$target),
+                 sensitivity(qda_mod_est_test, test_data$target))
+)
+
+kable(results) %>%
+  kable_styling()
+```
+
+```{r, message=FALSE}
+# Plot ROC
+roc_df <- list("Logistic Regression" = roc(test_data$target, lr_mod_est_prob$Yes),
+               "KNN" = roc(test_data$target, knn_mod_est_prob$Yes), 
+               "Random Forest" = roc(test_data$target, rf_mod_est_prob$Yes), 
+               "Boosting" = roc(test_data$target, boost_mod_est_prob$Yes), 
+               "LDA" = roc(test_data$target, lda_mod_est_prob$Yes), 
+               "QDA" = roc(test_data$target, qda_mod_est_prob$Yes))
+
+ggroc(roc_df, legacy.axes = TRUE) +
+  labs(title = "Receiver Operating Characteristic (ROC)",
+       y = "Sensitivity",
+       x = "1 - Specificity") +
+  scale_color_discrete(name = "Models")+
+  theme_bw()
+```
+
+
+#### Chosen model: Logistic Regression Model
+```{r}
+lr_mod$finalModel
+```
+
+
+```{r}
+exp(lr_mod$finalModel$coefficients)
+```
+
+
+```{r}
+## odds ratios and 95% CI
+exp(cbind(OR = lr_mod$finalModel$coefficients, confint(lr_mod$finalModel)))
+```
+
+
+## METHOD 2: THRESHOLD ADJUSTMENT
+
+#### Models
+**Stepwise with Linear Terms** \
+We will still use the stepwise regresion model to select variables contribute the most to the model.
+```{r}
+# full <- glm(target ~ ., data=train_data, family="binomial")
+# null <- glm(target ~ 1, data=train_data, family="binomial")
+# 
+# lr_step_mod_imbal <- step(null, list(lower=formula(null), upper=formula(full)), data=train_data, direction="both", trace=0)
+# options(scipen = 999)
+# summary(lr_step_mod_imbal)
+# 
+# # Save an object to a file
+# saveRDS(lr_step_mod_imbal, file = "lr_step_mod_imbal.rds")
+
+# Read the model in
+lr_step_mod_imbal <- readRDS(file = "lr_step_mod_imbal.rds")
+lr_step_mod_imbal
+```
+
+**Logistic Regression Model**
+```{r}
+# set.seed(1999)
+# lr_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                  data = train_data,
+#                  method = "glm",
+#                  family = "binomial",
+#                  metric="ROC",
+#                  trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                  preProcess = c("center", "scale"))
+# lr_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(lr_mod_imbal, file = "lr_mod_imbal.rds")
+```
+
+```{r}
+# Read the model back
+lr_mod_imbal <- readRDS(file = "lr_mod_imbal.rds")
+lr_mod_imbal
+```
+
+
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+lr_mod_est_train_imbal <- predict(lr_mod_imbal, train_data)
+
+# Confusion matrix
+confusionMatrix(train_data$target, lr_mod_est_train_imbal, positive="Yes")
+```
+
+
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+lr_mod_est_test_imbal <- predict(lr_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(lr_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+lr_mod_est_prob_imbal <-  predict(lr_mod_imbal, newdata = test_data, type="prob")
+lr_test_auc_imbal <- roc(test_data$target, lr_mod_est_prob_imbal$Yes)$auc
+lr_test_auc_imbal
+```
+
+
+**KNN Model**
+```{r}
+# set.seed(1999)
+# knn_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                        data = train_data,
+#                        method = "knn",
+#                        metric="ROC",
+#                        trControl = trainControl(method="cv", number = 5,
+#                                                 summaryFunction = twoClassSummary,
+#                                                 classProbs = TRUE,
+#                                                 savePredictions = TRUE),
+#                        preProcess = c("center", "scale"),
+#                        tuneGrid=data.frame(k=1:10))
+# knn_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(knn_mod_imbal, file = "knn_mod_imbal.rds")
+```
+
+```{r}
+# Read the model back
+knn_mod_imbal <- readRDS(file = "knn_mod_imbal.rds")
+knn_mod_imbal
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+knn_mod_est_train_imbal <- predict(knn_mod_imbal, train_data)
+# Confusion matrix
+confusionMatrix(train_data$target, knn_mod_est_train_imbal, positive="Yes")
+```
+
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+knn_mod_est_test_imbal <- predict(knn_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(knn_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+knn_mod_est_prob_imbal <-  predict(knn_mod_imbal, newdata = test_data, type="prob")
+knn_test_auc_imbal <- roc(test_data$target, knn_mod_est_prob_imbal$Yes)$auc
+knn_test_auc_imbal
+```
+
+
+**Random Forest Model**
+```{r}
+# set.seed(1999)
+# rf_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                       data = train_data,
+#                       method = "rf",
+#                       metric="ROC",
+#                       trControl = trainControl(method="cv", number = 5,
+#                                                 summaryFunction = twoClassSummary,
+#                                                 classProbs = TRUE,
+#                                                 savePredictions = TRUE),
+#                       tuneGrid=data.frame(mtry=1:9),
+#                       ntree=100)
+# rf_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(rf_mod_imbal, file = "rf_mod_imbal.rds")
+```
+
+```{r}
+# Read RDS file
+rf_mod_imbal <- readRDS(file = "rf_mod_imbal.rds")
+rf_mod_imbal
+```
+
+
+```{r}
+varImp(rf_mod_imbal, scale=FALSE)
+```
+
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+rf_mod_est_train_imbal <- predict(rf_mod_imbal, train_data)
+
+# Confusion matrix
+confusionMatrix(train_data$target, rf_mod_est_train_imbal, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+rf_mod_est_test_imbal <- predict(rf_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(rf_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+rf_mod_est_prob_imbal <-  predict(rf_mod_imbal, newdata = test_data, type="prob")
+rf_test_auc_imbal <- roc(test_data$target, rf_mod_est_prob_imbal$Yes)$auc
+rf_test_auc_imbal
+```
+
+**Boosting Model**
+```{r}
+# set.seed(1999)
+# boost_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                          data = train_data,
+#                          method = "gbm",
+#                          metric="ROC",
+#                          trControl = trainControl(method="cv", number = 5,
+#                                           summaryFunction = twoClassSummary,
+#                                           classProbs = TRUE,
+#                                           savePredictions = TRUE),
+#                          tuneGrid = expand.grid(n.trees=seq(100, 200, by=50),
+#                                                 interaction.depth=1:7,
+#                                                 shrinkage=0.1,
+#                                                 n.minobsinnode=10),
+#                          verbose = F)
+# 
+# boost_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(boost_mod_imbal, file = "boost_mod_imbal.rds")
+```
+
+```{r}
+# Read the model back
+boost_mod_imbal <- readRDS(file = "boost_mod_imbal.rds")
+boost_mod_imbal
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+boost_mod_est_train_imbal <- predict(boost_mod_imbal, train_data)
+
+# Confusion matrix
+confusionMatrix(train_data$target, boost_mod_est_train_imbal, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+boost_mod_est_test_imbal <- predict(boost_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(boost_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+boost_mod_est_prob_imbal <-  predict(boost_mod_imbal, newdata = test_data, type="prob")
+boost_test_auc_imbal <- roc(test_data$target, boost_mod_est_prob_imbal$Yes)$auc
+boost_test_auc_imbal
+```
+
+```{r}
+varImp(boost_mod_imbal, scale=FALSE)
+```
+
+**LDA Model**
+```{r}
+# set.seed(1999)
+# lda_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                        data = train_data,
+#                        method = "lda",
+#                        metric="ROC",
+#                        trControl = trainControl(method="cv", number = 5,
+#                                                 summaryFunction = twoClassSummary,
+#                                                 classProbs = TRUE,
+#                                                 savePredictions = TRUE),
+#                        preProcess = c("center", "scale"))
+# 
+# lda_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(lda_mod_imbal, file = "lda_mod_imbal.rds")
+```
+
+```{r}
+# Read the model back
+lda_mod_imbal <- readRDS(file = "lda_mod_imbal.rds")
+lda_mod_imbal
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+lda_mod_est_train_imbal <- predict(lda_mod_imbal, train_data)
+
+# Confusion matrix
+confusionMatrix(train_data$target, lda_mod_est_train_imbal, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+lda_mod_est_test_imbal <- predict(lda_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(lda_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+lda_mod_est_prob_imbal <-  predict(lda_mod_imbal, newdata = test_data, type="prob")
+lda_test_auc_imbal <- roc(test_data$target, lda_mod_est_prob_imbal$Yes)$auc
+lda_test_auc_imbal
+```
+
+**QDA Model**
+```{r}
+# set.seed(1999)
+# qda_mod_imbal <- train(formula(lr_step_mod_imbal),
+#                        data = train_data,
+#                        method = "qda",
+#                        metric="ROC",
+#                        trControl = trainControl(method="cv", number = 5,
+#                                                 summaryFunction = twoClassSummary,
+#                                                 classProbs = TRUE,
+#                                                 savePredictions = TRUE),
+#                        preProcess = c("center", "scale"))
+# 
+# qda_mod_imbal
+# 
+# # Save an object to a file
+# saveRDS(qda_mod_imbal, file = "qda_mod_imbal.rds")
+```
+
+```{r}
+# Read the model back
+qda_mod_imbal <- readRDS(file = "qda_mod_imbal.rds")
+qda_mod_imbal
+```
+
+```{r}
+# TRAINING DATA SET
+# Predict on training set
+qda_mod_est_train_imbal <- predict(qda_mod_imbal, train_data)
+
+# Confusion matrix
+confusionMatrix(train_data$target, qda_mod_est_train_imbal, positive="Yes")
+```
+
+```{r, message=FALSE}
+# TEST DATA SET
+# Predicted value on test set
+qda_mod_est_test_imbal <- predict(qda_mod_imbal, newdata = test_data)
+
+# Confusion matrix
+confusionMatrix(qda_mod_est_test_imbal, test_data$target, positive = "Yes")
+
+# AUC
+qda_mod_est_prob_imbal <-  predict(qda_mod_imbal, newdata = test_data, type="prob")
+qda_test_auc_imbal <- roc(test_data$target, qda_mod_est_prob_imbal$Yes)$auc
+qda_test_auc_imbal
+```
+
+#### Evaluation
+```{r, message=FALSE}
+results_imbal <- data.frame(
+  Model = c("Logistic Regression", "KNN", "Random Forest", "Boosting", "LDA", "QDA"),
+  ROC.Valid = c(lr_test_auc_imbal, knn_test_auc_imbal, rf_test_auc_imbal, 
+                boost_test_auc_imbal, lda_test_auc_imbal, qda_test_auc_imbal),
+  Sens.Valid = c(sensitivity(lr_mod_est_test_imbal, test_data$target, positive="Yes"),
+                 sensitivity(knn_mod_est_test_imbal, test_data$target, positive="Yes"),
+                 sensitivity(rf_mod_est_test_imbal, test_data$target, positive="Yes"),
+                 sensitivity(boost_mod_est_test_imbal, test_data$target, positive="Yes"),
+                 sensitivity(lda_mod_est_test_imbal, test_data$target, positive="Yes"),
+                 sensitivity(qda_mod_est_test_imbal, test_data$target, positive="Yes")),
+  Spec.Valid = c(sensitivity(lr_mod_est_test_imbal, test_data$target),
+                 sensitivity(knn_mod_est_test_imbal, test_data$target),
+                 sensitivity(rf_mod_est_test_imbal, test_data$target),
+                 sensitivity(boost_mod_est_test_imbal, test_data$target),
+                 sensitivity(lda_mod_est_test_imbal, test_data$target),
+                 sensitivity(qda_mod_est_test_imbal, test_data$target))
+)
+
+kable(results_imbal) %>%
+  kable_styling()
+```
+
+
+```{r, message=FALSE}
+# Plot ROC
+roc_df_imbal <- list("Logistic Regression" = roc(test_data$target, lr_mod_est_prob_imbal$Yes),
+               "KNN" = roc(test_data$target, knn_mod_est_prob_imbal$Yes), 
+               "Random Forest" = roc(test_data$target, rf_mod_est_prob_imbal$Yes), 
+               "Boosting" = roc(test_data$target, boost_mod_est_prob_imbal$Yes), 
+               "LDA" = roc(test_data$target, lda_mod_est_prob_imbal$Yes), 
+               "QDA" = roc(test_data$target, qda_mod_est_prob_imbal$Yes))
+
+ggroc(roc_df_imbal, legacy.axes = TRUE) +
+  labs(title = "Receiver Operating Characteristic (ROC)",
+       y = "Sensitivity",
+       x = "1 - Specificity") +
+  scale_color_discrete(name = "Models")+
+  theme_bw()
+```
+
+Based on the ROC of the validation set, the logistic regression is selected because of its highest ROC among 6 models. However, we need to adjust the decision threshold since the data is imbalanced. \
+
+
+#### Chosen model: Logistic Regression Model
+```{r, message=FALSE}
+coords(roc(test_data$target, lr_mod_est_prob_imbal$Yes),"best", ret="threshold")
+```
+
+```{r}
+lr_mod_est_resp_test_imbal <- predict(lr_step_mod_imbal, newdata = test_data, type = "response")
+preds <- as.factor(ifelse(lr_mod_est_resp_test_imbal > 0.2389457, "Yes", "No"))
+confusionMatrix(preds, test_data$target, positive = "Yes")
+```
+
+```{r}
+lr_mod_imbal$finalModel
+```
+
+
+```{r}
+exp(lr_mod_imbal$finalModel$coefficients)
+```
+
+
+```{r}
+## odds ratios and 95% CI
+exp(cbind(OR = lr_mod_imbal$finalModel$coefficients, confint(lr_mod_imbal$finalModel)))
+```
+
+
+**Citation**
+```{r}
+#  # Generate citation for used packages
+# citation("tidyverse")
+# citation("ggplot2")
+# citation("caret")
+# citation("mice")
+# citation("VIM")
+# citation("lattice")
+# citation("ROSE")
+# citation("pROC")
+# citation("ROCR")
+# citation("knitr")
+# citation("kableExtra")
+# citation("gridExtra")
+# citation("gbm")
+```
+
