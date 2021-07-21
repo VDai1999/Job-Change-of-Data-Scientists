@@ -41,9 +41,6 @@ table(train_data$target)
 # Proportion of 2 classes in the training data set
 prop.table(table(train_data$target))
 
-train_balanced_both <- ovun.sample(target ~ ., data = train_data, 
-                                   method = "both", p=0.5, 
-                                   N=nrow(train_data), seed = 1)$data
 train_data_balanced <- ROSE(target ~ ., data = train_data, seed = 1999)$data
 prop.table(table(train_data_balanced$target))
 
