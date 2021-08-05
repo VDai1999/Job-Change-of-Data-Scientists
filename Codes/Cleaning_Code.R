@@ -213,5 +213,3 @@ dat <- dat %>%
 table(dat$target)
 # Proportion of 2 classes
 prop.table(table(dat$target))
-
-
