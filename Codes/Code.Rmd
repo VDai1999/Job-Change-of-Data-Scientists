@@ -38,36 +38,48 @@ str(data)
 
 #### Cleaning data
 ```{r}
-# Recode variables
+################################################################
+# DATA CLEANING
+################################################################
+# Recode variables: character to factor data type
+cols <- c('gender', 'relevent_experience', 'education_level', 'major_discipline',
+          'experience', 'company_size', 'company_type', 'last_new_job', 'target')
+data[cols] <- lapply(data[cols], as.factor)
+
+# Reorder levels of categorical variables in an appropriate order
 data <- data %>%
-  # Recode variables as factor type
-  mutate(gender = as.factor(gender),
-         relevent_experience = as.factor(relevent_experience),
-         enrolled_university = as.factor(enrolled_university),
-         education_level = as.factor(enrolled_university),
-         major_discipline = as.factor(major_discipline),
-         experience = as.factor(experience), #
-         company_size = as.factor(company_size),
-         company_type = as.factor(company_type),
-         last_new_job = as.factor(last_new_job),
-         target = as.factor(target)) %>%
-  # Reorder levels of categorical variables in an appropriate order
   mutate(gender =  factor(gender, levels = c("Male", "Female", "Other")),
-         enrolled_university = factor(enrolled_university, levels = c("no_enrollment", "Part time course",
-                                                                      "Full time course")),
-         education_level = factor(education_level, levels = c("no_enrollment", "Part time course", 
-                                                              "Full time course")),
-         major_discipline = factor(major_discipline, levels = c("Arts", "Business Degree", "Humanities",
-                                                                "STEM", "Other", "No Major")),
-         company_size = ifelse(as.character(company_size) == "10/49", "10-49", as.character(company_size)),
+         enrolled_university = factor(enrolled_university, 
+                                      levels = c("no_enrollment", 
+                                                 "Part time course", 
+                                                 "Full time course")),
+         education_level = factor(education_level, 
+                                  levels = c("no_enrollment", 
+                                             "Part time course", 
+                                              "Full time course")),
+         major_discipline = factor(major_discipline, 
+                                   levels = c("Arts", 
+                                              "Business Degree", 
+                                              "Humanities",
+                                              "STEM", "Other", "No Major")),
+         company_size = ifelse(as.character(company_size) == "10/49", "10-49", 
+                               as.character(company_size)),
          company_size = as.factor(company_size),
-         company_size = factor(company_size, levels = c("<10", "10-49", "50-99", "100-500", "500-999",
-                                                        "1000-4999", "5000-9999", "10000+")),
-         experience = factor(experience, levels = c("<1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
-                                                    "12", "13", "14", "15", "16", "17", "18", "19", "20", ">20")),
-         company_type = factor(company_type, levels = c("Early Stage Startup", "Funded Startup", "Pvt Ltd", 
-                                                        "Public Sector", "NGO", "Other")),
-         last_new_job = factor(last_new_job, levels = c("never", "1", "2", "3", "4", ">4")))
+         company_size = factor(company_size, 
+                               levels = c("<10", "10-49", "50-99", 
+                                          "100-500", "500-999",
+                                          "1000-4999", "5000-9999", "10000+")),
+         experience = factor(experience, 
+                             levels = c("<1", "1", "2", "3", "4", "5", "6", 
+                                        "7", "8", "9", "10", "11", "12", "13", 
+                                        "14", "15", "16", "17", "18", 
+                                        "19", "20", ">20")),
+         company_type = factor(company_type, 
+                               levels = c("Early Stage Startup", 
+                                          "Funded Startup", "Pvt Ltd", 
+                                          "Public Sector", "NGO", "Other")),
+         last_new_job = factor(last_new_job, 
+                               levels = c("never", "1", "2", "3", "4", ">4")))
 
 str(data)
 ```
@@ -1072,4 +1084,3 @@ citation("kableExtra")
 citation("gridExtra")
 citation("gbm")
 ```
-
