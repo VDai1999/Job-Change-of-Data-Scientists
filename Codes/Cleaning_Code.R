@@ -14,25 +14,23 @@ library(gridExtra)
 data <- read.csv("aug_train.csv") %>%
   # Delete enroll_id and city variable
   select(-c(enrollee_id, city))
+
+# View the summary statistics
 summary(data)
+
+# View the data type
 str(data)
 
+################################################################
+# DATA CLEANING
+################################################################
+# Recode variables: character to factor data type
+cols <- c('gender', 'relevent_experience', 'education_level', 'major_discipline',
+          'experience', 'company_size', 'company_type', 'last_new_job', 'target')
+data[cols] <- lapply(data[cols], as.factor)
 
-# CLEAN DATA
-# Recode variables
+# Reorder levels of categorical variables in an appropriate order
 data <- data %>%
-  # Recode variables as factor type
-  mutate(gender = as.factor(gender),
-         relevent_experience = as.factor(relevent_experience),
-         enrolled_university = as.factor(enrolled_university),
-         education_level = as.factor(enrolled_university),
-         major_discipline = as.factor(major_discipline),
-         experience = as.factor(experience), #
-         company_size = as.factor(company_size),
-         company_type = as.factor(company_type),
-         last_new_job = as.factor(last_new_job),
-         target = as.factor(target)) %>%
-  # Reorder levels of categorical variables in an appropriate order
   mutate(gender =  factor(gender, levels = c("Male", "Female", "Other")),
          enrolled_university = factor(enrolled_university, 
                                       levels = c("no_enrollment", 
@@ -67,7 +65,6 @@ data <- data %>%
                                levels = c("never", "1", "2", "3", "4", ">4")))
 
 str(data)
-
 
 # Collapse levels of experience variable
 # The experience variable has 22 levels; thus, we decide to collapse this variable.
