@@ -1,3 +1,4 @@
+![Logo](https://e7.pngegg.com/pngimages/756/750/png-clipart-data-analysis-business-analytics-data-science-big-data-business-text-resume-thumbnail.png)
 
 # The Analysis of Job Change of Data Scientists
 
