@@ -83,4 +83,4 @@ library(gbm)
 
  
 ## Acknowledgements
-The retrieved data is [Coronavirus (Covid-19) Data in the United States](https://github.com/nytimes/covid-19-data)
+The data is available on [Kaggle website](https://www.kaggle.com/arashnic/hr-analytics-job-change-of-data-scientists)
